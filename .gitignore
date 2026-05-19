@@ -1,0 +1,10 @@
+frontend/node_modules/
+frontend/dist/
+backend/__pycache__/
+backend/*.pyc
+.vercel/
+.env
+*.log
+backend/model.pkl
+backend/label_encoder.pkl
+backend/model_meta.pkl

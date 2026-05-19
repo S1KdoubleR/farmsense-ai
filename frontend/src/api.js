@@ -71,7 +71,7 @@ export async function getMarketPrices() {
  * Health check — also returns model accuracy.
  */
 export async function getHealth() {
-  const res = await fetch(`${BASE}/health`);
+  const res = await fetch(`${BASE}/health`, { cache: "no-store" });
   if (!res.ok) throw new Error("Backend not reachable");
   return res.json();
 }

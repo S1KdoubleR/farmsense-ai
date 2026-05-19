@@ -88,9 +88,24 @@ export default function App() {
   const [submittedParams, setSubmittedParams] = useState(null);
 
   useEffect(() => {
-    getHealth()
-      .then(() => setBackendStatus('online'))
-      .catch(() => setBackendStatus('offline'));
+    let cancelled = false;
+
+    const checkBackend = async () => {
+      try {
+        await getHealth();
+        if (!cancelled) setBackendStatus('online');
+      } catch {
+        if (!cancelled) setBackendStatus('offline');
+      }
+    };
+
+    checkBackend();
+    const intervalId = window.setInterval(checkBackend, 15000);
+
+    return () => {
+      cancelled = true;
+      window.clearInterval(intervalId);
+    };
   }, []);
 
   const handleSubmit = async (params) => {

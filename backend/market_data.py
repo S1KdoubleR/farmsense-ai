@@ -1,6 +1,6 @@
 """
 market_data.py — FarmSense AI
-Market scoring data for all 55 crops available in the recommendation system.
+Market scoring data for all supported crops available in the recommendation system.
 Includes: market scores, cost/yield/revenue data, government schemes, and AI insights.
 Sources: Agmarknet, APEDA, India Agristat 2023-24, PM-KISAN portal, RKVY guidelines.
 """

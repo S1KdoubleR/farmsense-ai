@@ -2,9 +2,9 @@
 model.py — FarmSense AI
 ML model training, saving, and prediction logic.
 
-Uses scikit-learn Random Forest Classifier trained on the full 55-crop dataset.
+Uses scikit-learn Random Forest Classifier trained on the full crop dataset.
 Features: N, P, K, temperature, humidity, ph, rainfall (7 numeric features)
-Target:   label (55 crop classes)
+Target:   label (crop classes)
 
 On startup:
   - If model.pkl exists → load it
@@ -125,7 +125,7 @@ def predict_top_n(
     """
     Run inference and return the top_n crops with their NORMALIZED fit scores.
 
-    Normalization: raw model probabilities for 55 classes are often small (e.g. 0.15).
+    Normalization: raw model probabilities across many classes are often small (e.g. 0.15).
     We normalize so the top candidate maps to a fit_score of 85–95, and lower
     candidates scale proportionally — ensuring all recommended crops score >= 50.
 
@@ -165,7 +165,7 @@ def predict_top_n(
     return results
 
 
-# ─── Optimal soil ranges for 55 crops ────────────────────────────────────────
+# ─── Optimal soil ranges for supported crops ─────────────────────────────────
 OPTIMAL = {
     "rice":        dict(N=(60,100), P=(30,60),  K=(30,60),  temp=(20,30), rain=(100,200), ph=(5.5,7.0)),
     "wheat":       dict(N=(60,120), P=(30,60),  K=(30,60),  temp=(15,25), rain=(50,100),  ph=(6.0,7.5)),

@@ -212,7 +212,7 @@ export default function App() {
                 fontSize: 11, color: 'var(--accent-bright)',
                 letterSpacing: '0.06em', fontWeight: 700,
                 textTransform: 'uppercase',
-              }}>AI-Powered · 55 Indian Crops · Live Weather Integration</span>
+              }}>AI-Powered · 56 Indian Crops · Live Weather Integration</span>
             </div>
 
             <h2 style={{
@@ -233,7 +233,7 @@ export default function App() {
               fontFamily: 'Inter, sans-serif',
             }}>
               Enter your soil parameters, location, and farm economics. Our ML system analyzes
-              11 parameters across 55 crops to recommend the most profitable options for your land.
+              11 parameters across 56 crops to recommend the most profitable options for your land.
             </p>
 
             {/* Feature strip */}

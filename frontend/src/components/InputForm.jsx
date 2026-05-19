@@ -7,8 +7,8 @@
  * - Real-time weather auto-fill
  * - Tab: Manual Entry | Upload Soil Report
  */
-import { useState } from 'react';
-import { getWeather } from '../api';
+import { useEffect, useState } from 'react';
+import { getLocationSuggestions, getWeather } from '../api';
 import UploadReport from './UploadReport';
 
 // ── SVG Icons ──────────────────────────────────────────────────────────────
@@ -208,11 +208,50 @@ export default function InputForm({ onSubmit, loading }) {
   const [weatherLoading, setWeatherLoading] = useState(false);
   const [weatherMsg, setWeatherMsg] = useState({ text: '', type: '' }); // type: 'success' | 'error'
   const [weatherData, setWeatherData] = useState(null);
+  const [locationSuggestions, setLocationSuggestions] = useState([]);
+  const [locationSuggestOpen, setLocationSuggestOpen] = useState(false);
+  const [locationSuggestLoading, setLocationSuggestLoading] = useState(false);
   const [optimizations, setOptimizations] = useState({
     profit: true, demand: true, soilHealth: true, water: true,
   });
 
   const set = (key, val) => setValues((v) => ({ ...v, [key]: val }));
+
+  useEffect(() => {
+    const query = values.location.trim();
+    if (query.length < 2) {
+      setLocationSuggestions([]);
+      setLocationSuggestOpen(false);
+      return;
+    }
+
+    let cancelled = false;
+    setLocationSuggestions([]);
+    setLocationSuggestOpen(true);
+    setLocationSuggestLoading(true);
+
+    const timeoutId = window.setTimeout(async () => {
+      try {
+        const data = await getLocationSuggestions(query);
+        if (!cancelled) {
+          setLocationSuggestions(data.suggestions || []);
+          setLocationSuggestOpen(true);
+        }
+      } catch {
+        if (!cancelled) {
+          setLocationSuggestions([]);
+          setLocationSuggestOpen(false);
+        }
+      } finally {
+        if (!cancelled) setLocationSuggestLoading(false);
+      }
+    }, 250);
+
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timeoutId);
+    };
+  }, [values.location]);
 
   // Called by UploadReport when OCR extracts values
   const handleExtracted = (extracted) => {
@@ -223,6 +262,7 @@ export default function InputForm({ onSubmit, loading }) {
       ...(extracted.potassium   != null ? { potassium: extracted.potassium }     : {}),
       ...(extracted.ph          != null ? { ph: extracted.ph }                   : {}),
       ...(extracted.organic_carbon != null ? { organic_carbon: extracted.organic_carbon } : {}),
+      ...(extracted.electrical_conductivity != null ? { electrical_conductivity: extracted.electrical_conductivity } : {}),
     }));
     setActiveTab('manual'); // switch to manual after extraction so user can review
   };
@@ -244,6 +284,7 @@ export default function InputForm({ onSubmit, loading }) {
         rainfall:    Math.min(300, Math.max(20, data.rainfall)),
       }));
       setWeatherMsg({ text: `Weather data loaded for ${data.location}`, type: 'success' });
+      setLocationSuggestOpen(false);
     } catch (err) {
       setWeatherMsg({ text: err.message, type: 'error' });
     } finally {
@@ -343,10 +384,46 @@ export default function InputForm({ onSubmit, loading }) {
                     style={{ paddingLeft: 34 }}
                     placeholder="e.g. Nashik, Pune, Indore, Ludhiana..."
                     value={values.location}
-                    onChange={(e) => set('location', e.target.value)}
+                    onChange={(e) => {
+                      set('location', e.target.value);
+                      setWeatherData(null);
+                      setWeatherMsg({ text: '', type: '' });
+                    }}
+                    onFocus={() => locationSuggestions.length > 0 && setLocationSuggestOpen(true)}
+                    onBlur={() => window.setTimeout(() => setLocationSuggestOpen(false), 150)}
                     onKeyDown={(e) => e.key === 'Enter' && handleWeatherFill()}
                     aria-label="Location city name"
+                    autoComplete="off"
                   />
+                  {locationSuggestOpen && (locationSuggestions.length > 0 || locationSuggestLoading) && (
+                    <div
+                      className="location-suggestions"
+                      role="listbox"
+                      aria-label="Indian location suggestions"
+                    >
+                      {locationSuggestLoading && locationSuggestions.length === 0 ? (
+                        <div className="location-suggestion muted">Searching India...</div>
+                      ) : (
+                        locationSuggestions.slice(0, 4).map((item) => (
+                          <button
+                            key={`${item.name}-${item.latitude}-${item.longitude}`}
+                            type="button"
+                            className="location-suggestion"
+                            onMouseDown={(e) => e.preventDefault()}
+                            onClick={() => {
+                              set('location', item.name);
+                              setWeatherData(null);
+                              setWeatherMsg({ text: '', type: '' });
+                              setLocationSuggestOpen(false);
+                            }}
+                          >
+                            <span>{item.name}</span>
+                            <small>{[item.admin2, item.admin1, item.country].filter(Boolean).join(', ')}</small>
+                          </button>
+                        ))
+                      )}
+                    </div>
+                  )}
                 </div>
                 <button
                   id="weather-autofill-btn"

@@ -38,6 +38,21 @@ export async function getWeather(location) {
 }
 
 /**
+ * GET /locations?query={text}
+ * Fetch up to 4 Indian location suggestions for weather auto-fill.
+ */
+export async function getLocationSuggestions(query) {
+  const res = await fetch(
+    `${BASE}/locations?query=${encodeURIComponent(query)}`
+  );
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: "Unknown error" }));
+    throw new Error(err.detail || `HTTP ${res.status}`);
+  }
+  return res.json();
+}
+
+/**
  * POST /upload-report
  * Upload a soil report file (PDF/JPG/PNG) for OCR extraction.
  * Returns extracted N/P/K/pH values.
@@ -58,7 +73,7 @@ export async function uploadSoilReport(file) {
 
 /**
  * GET /market-prices
- * Returns market price reference data for all 55 crops.
+ * Returns market price reference data for all supported crops.
  */
 export async function getMarketPrices() {
   const res = await fetch(`${BASE}/market-prices`);

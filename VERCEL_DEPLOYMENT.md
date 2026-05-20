@@ -47,3 +47,20 @@ http://localhost:8001
 ## Backend note
 
 The current backend uses FastAPI, scikit-learn model files, OCR libraries, and Python dependencies. It is better hosted as a separate backend service and then connected to the Vercel frontend through `VITE_API_BASE_URL`.
+
+## Live mandi price note
+
+The React frontend does not need the data.gov.in key. Add this only to the Render/FastAPI backend service:
+
+```text
+DATA_GOV_API_KEY=your_data_gov_api_key
+```
+
+After the backend redeploys, `/health` should show:
+
+```json
+{
+  "live_mandi_prices": true,
+  "mandi_archive_available": true
+}
+```

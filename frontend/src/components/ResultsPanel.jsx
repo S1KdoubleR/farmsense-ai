@@ -240,7 +240,7 @@ export default function ResultsPanel({ results, onBack, inputParams }) {
           color: 'var(--text-muted)', lineHeight: 1.65,
         }}>
           Recommendations are based on ML analysis of soil parameters and historical crop data.
-          Revenue projections use estimated yields and Agmarknet 2024-25 price data.
+          Revenue projections use estimated yields and live data.gov.in AGMARKNET modal prices when available, otherwise static Agmarknet 2024-25 estimates.
           Always consult a local agronomist and current market conditions before making final decisions.
           Government scheme eligibility is subject to state-specific rules and annual budget allocations.
         </p>

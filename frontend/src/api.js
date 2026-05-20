@@ -82,6 +82,19 @@ export async function getMarketPrices() {
 }
 
 /**
+ * GET /market-history
+ * Returns rows from the local 10-year mandi price archive.
+ */
+export async function getMarketHistory({ crop = "", limit = 100 } = {}) {
+  const params = new URLSearchParams();
+  if (crop) params.set("crop", crop);
+  params.set("limit", String(limit));
+  const res = await fetch(`${BASE}/market-history?${params.toString()}`);
+  if (!res.ok) throw new Error("Could not fetch market history");
+  return res.json();
+}
+
+/**
  * GET /health
  * Health check — also returns model accuracy.
  */

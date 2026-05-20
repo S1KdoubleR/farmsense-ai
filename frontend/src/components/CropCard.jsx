@@ -53,6 +53,15 @@ function fmtINR(n) {
   return `${Math.round(n)}`;
 }
 
+function marketSourceLabel(rec) {
+  if (rec.live_price_used) {
+    return rec.market_price_date
+      ? `Live mandi rate (${rec.market_price_date})`
+      : 'Live mandi rate';
+  }
+  return 'Static estimate';
+}
+
 export default function CropCard({ rec, delay = 0 }) {
   const [activeTab, setActiveTab] = useState('overview');
   const isTop = rec.rank === 1;
@@ -296,6 +305,8 @@ export default function CropCard({ rec, delay = 0 }) {
                 { label: 'Cost per Acre',        value: `INR ${fmtINR(rec.cost_per_acre)}` },
                 { label: 'Expected Yield',        value: `${rec.yield_per_acre} quintals/acre` },
                 { label: 'Market Price',          value: `INR ${fmtINR(rec.price_per_quintal)}/quintal` },
+                { label: 'Price Source',          value: marketSourceLabel(rec) },
+                ...(rec.market_location ? [{ label: 'Mandi Location', value: rec.market_location }] : []),
                 { label: 'Crop Cycle',            value: `${rec.cycle_days} days` },
               ].map(({ label, value }) => (
                 <div key={label} className="stat-row">

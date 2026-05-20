@@ -13,12 +13,70 @@ Run with: uvicorn main:app --reload --port 8001
 from fastapi import FastAPI, HTTPException, Query, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
+import csv
+import os
 import requests
+import time
+from pathlib import Path
 
 from model import load_or_train, predict_top_n, get_model_accuracy, generate_reason
 from market_data import get_market_score, MARKET_SCORES, DEMAND_SCORES
 
 INDIA_COUNTRY_CODE = "IN"
+
+
+def _load_local_env() -> None:
+    """Load backend/.env in local development without adding another dependency."""
+    env_path = os.path.join(os.path.dirname(__file__), ".env")
+    if not os.path.exists(env_path):
+        return
+
+    with open(env_path, "r", encoding="utf-8") as env_file:
+        for raw_line in env_file:
+            line = raw_line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, value = line.split("=", 1)
+            os.environ.setdefault(key.strip(), value.strip().strip('"').strip("'"))
+
+
+_load_local_env()
+
+DATA_GOV_API_URL = "https://api.data.gov.in/resource/current-daily-price-various-commodities-various-markets-mandi"
+DATA_GOV_API_KEY = os.getenv("DATA_GOV_API_KEY") or os.getenv("AGMARKNET_API_KEY")
+MANDI_CACHE_TTL_SECONDS = int(os.getenv("MANDI_CACHE_TTL_SECONDS", "21600"))
+MANDI_API_TIMEOUT_SECONDS = float(os.getenv("MANDI_API_TIMEOUT_SECONDS", "6"))
+BASE_DIR = Path(__file__).parent
+MANDI_ARCHIVE_PATH = BASE_DIR / "data" / "mandi_price_history_2016_2026.csv"
+MANDI_ARCHIVE_SUMMARY_PATH = BASE_DIR / "data" / "mandi_price_history_summary.json"
+
+_mandi_price_cache: dict[tuple[str, str, str, str], tuple[float, dict | None]] = {}
+_data_gov_disabled_until = 0.0
+
+COMMODITY_ALIASES: dict[str, list[str]] = {
+    "rice": ["Paddy(Dhan)(Common)", "Rice", "Paddy"],
+    "chickpea": ["Bengal Gram(Gram)(Whole)", "Gram", "Chana"],
+    "kidneybeans": ["Rajgir", "Beans"],
+    "pigeonpeas": ["Arhar (Tur/Red Gram)(Whole)", "Red Gram", "Arhar"],
+    "mothbeans": ["Moth Beans", "Moth"],
+    "mungbean": ["Green Gram (Moong)(Whole)", "Green Gram", "Moong"],
+    "blackgram": ["Black Gram (Urd Beans)(Whole)", "Black Gram", "Urd"],
+    "lentil": ["Lentil (Masur)(Whole)", "Masur"],
+    "watermelon": ["Water Melon", "Watermelon"],
+    "muskmelon": ["Karbuja(Musk Melon)", "Musk Melon", "Muskmelon"],
+    "cotton": ["Cotton", "Cotton Seed"],
+    "chilli": ["Dry Chillies", "Chilli", "Green Chilli"],
+    "capsicum": ["Chilly Capsicum", "Capsicum"],
+    "sweet_potato": ["Sweet Potato"],
+    "sugarcane": ["Sugarcane"],
+    "soybean": ["Soyabean", "Soybean"],
+    "groundnut": ["Groundnut", "Ground Nut Seed"],
+    "sesame": ["Sesamum(Sesame,Gingelly,Til)", "Sesame"],
+    "cumin": ["Cummin Seed(Jeera)", "Cumin"],
+    "pepper": ["Black pepper", "Pepper"],
+    "ginger": ["Ginger(Green)", "Ginger"],
+    "coriander": ["Corriander seed", "Coriander"],
+}
 
 INDIAN_LOCATION_ALIASES = {
     "bangalore": "Bengaluru",
@@ -145,6 +203,12 @@ class CropRecommendation(BaseModel):
     potential_revenue: float
     potential_profit: float
     roi_percent: float
+    market_source: str = "Static estimate"
+    market_location: str = ""
+    market_name: str = ""
+    market_price_date: str = ""
+    market_commodity: str = ""
+    live_price_used: bool = False
 
 
 class PredictResponse(BaseModel):
@@ -165,6 +229,217 @@ def _compute_revenue(mkt: dict, land_area: float) -> tuple[float, float, float]:
     net_profit = gross_revenue - cost_total
     roi = round((net_profit / cost_total) * 100, 1) if cost_total > 0 else 0.0
     return round(gross_revenue, 0), round(net_profit, 0), roi
+
+
+def _to_float(value) -> float | None:
+    """Parse numeric API values that may arrive as strings with commas."""
+    if value is None:
+        return None
+    try:
+        return float(str(value).replace(",", "").strip())
+    except (TypeError, ValueError):
+        return None
+
+
+def _date_rank(value: str | None) -> float:
+    if not value:
+        return 0.0
+    text = str(value).strip()
+    for fmt in ("%d/%m/%Y", "%d-%m-%Y", "%Y-%m-%d"):
+        try:
+            return time.mktime(time.strptime(text, fmt))
+        except ValueError:
+            continue
+    return 0.0
+
+
+def _commodity_candidates(crop_name: str) -> list[str]:
+    crop_key = crop_name.lower().replace(" ", "_")
+    aliases = COMMODITY_ALIASES.get(crop_key, [])
+    title_name = crop_key.replace("_", " ").title()
+    candidates = [*aliases, title_name, crop_name]
+    unique = []
+    for item in candidates:
+        if item and item not in unique:
+            unique.append(item)
+    return unique
+
+
+def _resolve_mandi_location(location: str) -> dict:
+    """
+    Convert the user's city/district text into state/district filters for
+    data.gov.in. If the lookup fails, live prices can still be fetched by
+    commodity alone.
+    """
+    if not location.strip():
+        return {}
+
+    try:
+        matches = _search_indian_locations(location, count=1)
+    except requests.RequestException:
+        return {}
+
+    if not matches:
+        return {}
+
+    item = matches[0]
+    return {
+        "state": item.get("admin1") or "",
+        "district": item.get("admin2") or item.get("name") or "",
+        "display": _location_display(item),
+    }
+
+
+def _select_mandi_price(records: list[dict]) -> dict | None:
+    valid = []
+    for record in records:
+        price = _to_float(record.get("modal_price"))
+        if price is None or price <= 0:
+            continue
+        valid.append((record, price, _date_rank(record.get("arrival_date"))))
+
+    if not valid:
+        return None
+
+    latest_date = max(date_value for _, _, date_value in valid)
+    latest_records = [item for item in valid if item[2] == latest_date] if latest_date else valid[:10]
+    prices = sorted(price for _, price, _ in latest_records)
+    median_price = prices[len(prices) // 2]
+    representative = min(latest_records, key=lambda item: abs(item[1] - median_price))[0]
+
+    return {
+        "price_per_quintal": round(median_price, 2),
+        "commodity": representative.get("commodity", ""),
+        "market": representative.get("market", ""),
+        "district": representative.get("district", ""),
+        "state": representative.get("state", ""),
+        "arrival_date": representative.get("arrival_date", ""),
+        "record_count": len(latest_records),
+        "source": "data.gov.in AGMARKNET live mandi feed",
+    }
+
+
+def _fetch_live_mandi_price(
+    crop_name: str,
+    location: dict | None = None,
+    market: str = "",
+) -> dict | None:
+    """Fetch the latest modal mandi price for a crop, with short in-memory caching."""
+    global _data_gov_disabled_until
+
+    if not DATA_GOV_API_KEY or time.time() < _data_gov_disabled_until:
+        return None
+
+    location = location or {}
+    state = (location.get("state") or "").strip()
+    district = (location.get("district") or "").strip()
+    market = market.strip()
+    cache_key = (crop_name.lower(), state.lower(), district.lower(), market.lower())
+    cached = _mandi_price_cache.get(cache_key)
+    if cached and time.time() - cached[0] < MANDI_CACHE_TTL_SECONDS:
+        return cached[1]
+
+    scopes = [(state, district)]
+    if district and not market:
+        scopes.append((state, ""))
+    if state and not market:
+        scopes.append(("", ""))
+
+    for scope_state, scope_district in scopes:
+        for commodity in _commodity_candidates(crop_name):
+            params = {
+                "api-key": DATA_GOV_API_KEY,
+                "format": "json",
+                "limit": 100,
+                "filters[commodity]": commodity,
+            }
+            if scope_state:
+                params["filters[state]"] = scope_state
+            if scope_district:
+                params["filters[district]"] = scope_district
+            if market:
+                params["filters[market]"] = market
+
+            try:
+                resp = requests.get(DATA_GOV_API_URL, params=params, timeout=MANDI_API_TIMEOUT_SECONDS)
+                if resp.status_code in {401, 403}:
+                    _data_gov_disabled_until = time.time() + 300
+                    _mandi_price_cache[cache_key] = (time.time(), None)
+                    return None
+                resp.raise_for_status()
+                selected = _select_mandi_price(resp.json().get("records") or [])
+            except (requests.RequestException, ValueError):
+                selected = None
+
+            if selected:
+                selected["requested_commodity"] = commodity
+                _mandi_price_cache[cache_key] = (time.time(), selected)
+                return selected
+
+    _mandi_price_cache[cache_key] = (time.time(), None)
+    return None
+
+
+def _market_score_with_live_price(crop_name: str, mkt: dict, live_price: dict | None) -> dict:
+    enriched = dict(mkt)
+    enriched.update({
+        "market_source": "Static estimate",
+        "market_location": "",
+        "market_name": "",
+        "market_price_date": "",
+        "market_commodity": "",
+        "live_price_used": False,
+    })
+
+    if not live_price:
+        return enriched
+
+    crop_key = crop_name.lower()
+    base = MARKET_SCORES.get(crop_key, {})
+    static_price = float(base.get("price_per_quintal") or mkt["price_per_quintal"] or 1)
+    live_modal_price = float(live_price["price_per_quintal"])
+    base_price_score = float(base.get("price_score", 50))
+    export_score = float(base.get("export", 50))
+    demand_score = DEMAND_SCORES.get(mkt["demand"], 65)
+
+    price_ratio = live_modal_price / static_price if static_price > 0 else 1.0
+    live_price_score = max(35, min(100, round(base_price_score * price_ratio)))
+    market_score = round(0.40 * live_price_score + 0.40 * demand_score + 0.20 * export_score)
+
+    location_parts = [
+        live_price.get("market"),
+        live_price.get("district"),
+        live_price.get("state"),
+    ]
+
+    enriched.update({
+        "price_per_quintal": live_modal_price,
+        "market_score": market_score,
+        "market_source": live_price.get("source", "data.gov.in AGMARKNET live mandi feed"),
+        "market_location": ", ".join([part for part in location_parts if part]),
+        "market_name": live_price.get("market", ""),
+        "market_price_date": live_price.get("arrival_date", ""),
+        "market_commodity": live_price.get("commodity") or live_price.get("requested_commodity", ""),
+        "live_price_used": True,
+    })
+    return enriched
+
+
+def _load_mandi_archive_rows(crop: str = "", limit: int = 100) -> list[dict]:
+    if not MANDI_ARCHIVE_PATH.exists():
+        return []
+
+    crop_key = crop.strip().lower().replace(" ", "_")
+    rows = []
+    with MANDI_ARCHIVE_PATH.open("r", newline="", encoding="utf-8") as csv_file:
+        reader = csv.DictReader(csv_file)
+        for row in reader:
+            if crop_key and row.get("crop", "").lower() != crop_key:
+                continue
+            rows.append(row)
+            if len(rows) >= limit:
+                break
+    return rows
 
 
 def _canonical_indian_location(query: str) -> str:
@@ -299,12 +574,15 @@ async def predict(req: PredictRequest):
 
     qualified = []
     fallback = []
+    mandi_location = _resolve_mandi_location(req.location) if req.location.strip() else {}
 
     for candidate in top_candidates:
         crop_name = candidate["crop"]
         fit_score = candidate["fit_score"]
 
-        mkt = get_market_score(crop_name)
+        base_mkt = get_market_score(crop_name)
+        live_price = _fetch_live_mandi_price(crop_name, mandi_location)
+        mkt = _market_score_with_live_price(crop_name, base_mkt, live_price)
         market_score = float(mkt["market_score"])
 
         # profit_index: blend of fit and market (ensure it's also normalized high)
@@ -354,6 +632,12 @@ async def predict(req: PredictRequest):
             potential_revenue=gross_rev,
             potential_profit=net_profit,
             roi_percent=roi,
+            market_source=mkt["market_source"],
+            market_location=mkt["market_location"],
+            market_name=mkt["market_name"],
+            market_price_date=mkt["market_price_date"],
+            market_commodity=mkt["market_commodity"],
+            live_price_used=mkt["live_price_used"],
         )
 
         # Score threshold: all 3 metrics >= 50
@@ -425,8 +709,35 @@ async def upload_report(file: UploadFile = File(...)):
 # ─── /market-prices endpoint ──────────────────────────────────────────────────
 
 @app.get("/market-prices")
-async def get_market_prices():
-    """Returns current market price reference data for all supported crops."""
+async def get_market_prices(
+    crop: str = Query("", description="Optional crop/commodity to fetch from live mandi feed"),
+    state: str = Query("", description="Optional mandi state filter"),
+    district: str = Query("", description="Optional mandi district filter"),
+    market: str = Query("", description="Optional mandi market filter"),
+):
+    """Returns market price reference data, with optional live data.gov.in lookup."""
+    if crop:
+        crop_key = crop.strip().lower().replace(" ", "_")
+        base_mkt = get_market_score(crop_key)
+        live_price = _fetch_live_mandi_price(
+            crop_key,
+            {"state": state.strip(), "district": district.strip()},
+            market=market,
+        )
+        mkt = _market_score_with_live_price(crop_key, base_mkt, live_price)
+        return {
+            "crop": crop_key,
+            "market_score": mkt["market_score"],
+            "price_per_quintal": mkt["price_per_quintal"],
+            "season": mkt["season"],
+            "demand": mkt["demand"],
+            "source": mkt["market_source"],
+            "market_location": mkt["market_location"],
+            "market_price_date": mkt["market_price_date"],
+            "market_commodity": mkt["market_commodity"],
+            "live_price_used": mkt["live_price_used"],
+        }
+
     prices = {}
     for crop, data in MARKET_SCORES.items():
         demand_score = DEMAND_SCORES[data["demand"]]
@@ -437,7 +748,38 @@ async def get_market_prices():
             "season": data["season"],
             "demand": data["demand"],
         }
-    return {"crops": prices, "source": "Agmarknet + APEDA estimates 2024-25"}
+    source = "Static Agmarknet + APEDA estimates 2024-25"
+    if DATA_GOV_API_KEY:
+        source += "; live lookup available with crop/state/district filters"
+    return {"crops": prices, "source": source}
+
+
+@app.get("/market-history")
+async def get_market_history(
+    crop: str = Query("", description="Optional crop filter, e.g. tomato"),
+    limit: int = Query(100, ge=1, le=1000, description="Maximum rows to return"),
+):
+    """Returns rows from the local 10-year mandi price archive."""
+    rows = _load_mandi_archive_rows(crop=crop, limit=limit)
+    if not rows:
+        raise HTTPException(
+            status_code=404,
+            detail="Mandi price archive not found or no rows match the requested crop.",
+        )
+
+    summary = {}
+    if MANDI_ARCHIVE_SUMMARY_PATH.exists():
+        try:
+            import json
+            summary = json.loads(MANDI_ARCHIVE_SUMMARY_PATH.read_text(encoding="utf-8"))
+        except ValueError:
+            summary = {}
+
+    return {
+        "summary": summary,
+        "count": len(rows),
+        "rows": rows,
+    }
 
 
 @app.get("/locations")
@@ -539,6 +881,8 @@ async def health():
         "model_accuracy": round(get_model_accuracy() * 100, 2),
         "version": "2.0.0",
         "total_crops": len(MARKET_SCORES),
+        "live_mandi_prices": bool(DATA_GOV_API_KEY),
+        "mandi_archive_available": MANDI_ARCHIVE_PATH.exists(),
     }
 
 

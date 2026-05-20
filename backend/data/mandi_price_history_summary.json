@@ -1,0 +1,11 @@
+{
+  "file": "mandi_price_history_2016_2026.csv",
+  "rows": 7000,
+  "crops": 56,
+  "start": "2016-01",
+  "end": "2026-05",
+  "granularity": "monthly",
+  "official_api_seeded_crops": 0,
+  "source_url": "https://api.data.gov.in/resource/current-daily-price-various-commodities-various-markets-mandi",
+  "generated_on": "2026-05-20"
+}
